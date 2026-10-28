@@ -1,59 +1,61 @@
 # How it works
 
-There are three pieces:
+There are three roles. The **operator** approves and answers requests. The **gateway** holds state and service connections. The **worker** runs in a sandbox with a socket to that gateway. `lease launch` owns their lifecycle for one command.
 
-1. **The operator** approves a policy, adds budget, or revokes it using local commands.
-2. **The gateway** keeps the token and SQLite state. It checks requests and constructs GitHub API calls.
-3. **The worker** uses CLI, MCP, or the Unix socket. On Linux it runs in a sandbox with that socket as its only service connection.
+## Service-independent enforcement
 
-All worker interfaces reach the same checks. The worker cannot edit the policy, see the token, or call administrative commands through the socket. There is one gateway per lease; access to its socket is access to that lease.
+The gateway does not construct GitHub calls or interpret MCP tool arguments. [Adapters](adapters.md) do that. The core owns:
 
-## Policy and counters
+- Strict policy compilation and approval rendering.
+- Persistent, atomic counter reservations.
+- Stable request IDs and recorded results.
+- Expiration, revocation, and audit records.
+- The worker-to-operator inbox.
 
-`lease init` writes the full policy; [the example](../examples/lease.json) shows its fields. Approval validates every field and displays the resulting permissions. Unknown fields and ambiguous JSON are rejected. `purpose` is an explanation, not a permission.
+A modular policy selects services, each with an adapter and public scope. Capability keys are `service.operation`. Private connection settings come from a separate operator file. The old single-GitHub policy is accepted for compatibility and routed through the GitHub adapter.
 
-`repo` selects one GitHub repository. `base_sha` pins reads and the parent of new commits. `base` names the PR target branch, which can move. The operator must choose a reviewed commit and appropriate base. `ttl_seconds` sets a lifetime of at most one day.
+All interfaces reach the same checks. A lease has one gateway and one Unix socket; access to that socket grants its worker permissions. There is no signed token or offline authority.
 
-| Counter | What consumes it |
+## One operation
+
+1. Validate the request envelope and adapter-specific parameters.
+2. In one SQLite transaction, check the lease, request ID, service-scoped ownership, and all budgets. Reserve the budgets and record the attempt as pending.
+3. Record authorization to enter the adapter. The adapter rechecks before each external dispatch.
+4. Save the result and any newly owned resource. Repeated requests return that result without dispatching again.
+
+| Counter | Unit |
 | --- | --- |
-| `read_file`, `publish`, `open_pr`, `comment` | One admitted attempt of that operation |
+| Each capability | One admitted attempt |
 | `operations` | Any admitted operation |
-| `write_operations` | An admitted publish, PR, or comment |
+| `write_operations` | An attempt the approved adapter definition classifies as a write |
 | `payload_bytes` | Canonical JSON bytes of admitted input parameters |
 
-Counters are reserved together before sending anything. A publish is one logical operation: getting the parent, creating a tree, creating a commit, and creating a new branch. That includes three remote writes. The byte counter measures input, not network traffic. Status, denied requests, and replayed results do not consume these budgets.
+These count operations, not every downstream effect. A GitHub publish includes three writes. One MCP tool can perform multiple effects. The byte budget covers inputs, not wire traffic, responses, or total exfiltration. Control messages and replayed/denied operations do not consume task counters.
 
-Files must be ordinary UTF-8 text with relative paths. Reads are limited to 256 KiB. Publishing accepts 1–50 files, makes them regular `100644` files, and forbids `.github` changes, deletions, symlinks, submodules, and executable modes. These restrictions do not make existing CI safe.
+A changed request under an existing ID is refused. Failures keep reservations. Recovery marks unfinished operations uncertain and never replays them. The operator must reconcile uncertain effects before issuing new work. Reads also use recorded results: choose a new ID for an intentional fresh read of changing service data.
 
-## One request from start to finish
+## Questions and extensions
 
-1. Validate its operation, parameters, and request ID.
-2. In one SQLite transaction, check expiration, revocation, resource ownership, and all budgets. Reserve the budgets and save the pending request.
-3. Before each GitHub call, check expiration/revocation again and log the dispatch authorization.
-4. Save the result and any branch/PR it created. The result can then be returned again without sending another request.
+Workers can submit a question or ask to raise one existing cap. SQLite stores the request, then the worker polls for the answer. Submission grants nothing. There are at most three new requests per hour; IDs are idempotent and messages are limited to 2,000 characters.
 
-A changed request under an existing ID is refused. CLI and MCP derive default IDs from the operation and parameters; explicit IDs remain available for intentional repeats.
+Operator commands read private state directly. `decide` displays a budget diff and the agent's words separately. Approval checks the rendered policy hash and commits the grant and answer in one transaction. A partial approval cannot exceed the requested amount. Questions and denials never grant authority. Resource additions, lifetime extensions, and automatic queued effects are not implemented.
 
-Failures keep their reservation. After a restart, unfinished requests become uncertain and are not replayed. A crash can therefore consume budget without creating a remote effect, or leave an effect whose ownership was not recorded. There is no automatic refund or reconciliation. The operator must inspect GitHub before replacing uncertain work.
+The inbox is independent of operation execution, so a slow operation does not block questions and an exhausted task budget does not prevent a request. Expiration/revocation closes pending requests.
 
-Revocation stops new dispatch authorizations, including remaining steps of a publish. A previously authorized request can still complete. Revocation does not kill the worker, delete files, or revoke the operator's GitHub token.
+## Lifecycle and revocation
 
-## Token and state
+`launch` approves a new lease, starts the gateway, starts bubblewrap, and watches the worker. Worker exit or interruption revokes the lease and closes the gateway and upstream MCP processes. Expiration or operator revocation also causes the supervisor to stop the worker. State and workspace files remain for inspection.
 
-The gateway reads one operator-supplied token file. It never uses ambient `gh` or environment credentials. The operator controls the token's repository scope, permissions, expiry, and replacement. There is no token issuance or refresh service.
+`approve` / `serve` / `run` expose the same pieces separately. In that mode, the operator owns their lifecycle: revocation blocks subsequent dispatch, but does not kill independently attached workers.
 
-HTTPS goes only to `api.github.com`, verifies TLS, ignores proxy environment variables, rejects redirects, bounds responses, and does not retry. The worker cannot supply URLs, credentials, HTTP methods, or a different repo. PRs and comments are restricted using locally recorded successful creations, not name prefixes or body stamps.
+Revocation is checked at dispatch authorization. A request authorized just before revocation can still complete. Neither revocation nor killing an MCP process recalls remote work already accepted by a service.
 
-The private state directory contains policy, counters, recorded results, and events. Results can include source code; protect the directory accordingly. Events omit request bodies. Their hash chain can detect local record changes, but is not immutable or externally anchored. Do not restore a stale database as active authority.
+## State and transport
 
-A grant raises exactly one ceiling after displaying the diff and checking that the policy has not changed during approval. It cannot change the repo or expiration. The worker gets no grant endpoint.
+SQLite stores policy, counters, ownership, results, the inbox, and events. Results and inbox messages may contain sensitive data. Protect the entire state directory and never restore a stale database as active authority.
 
-## Wire format
+Events omit argument and answer bodies and include hashes. The local hash chain detects altered records relative to its saved history; it is not immutable or externally anchored. The server takes an exclusive lock before restart recovery.
 
-One newline-terminated JSON request per Unix socket connection; maximum 1 MiB:
+The worker protocol uses one JSON line per socket connection, at most 1 MiB. Up to eight connections can be active, with one executing adapter operation at a time. Denials include stable machine-readable reasons. CLI and MCP use the same protocol and derive default IDs from operation and parameters.
 
-```json
-{"id":"read-1","operation":"read_file","params":{"path":"README.md"}}
-```
-
-Status needs only `{"operation":"status"}`. Responses use the same shape described in [agent setup](agents.md). There are up to eight connections and one executing operation. The server takes an exclusive lock before restart recovery. Restart workers after restarting the gateway because the socket inode changes.
+The MCP frontend discovers approved operations from the gateway. It does not maintain an ecosystem-specific tool list. The MCP service adapter is a separate component: it talks to a trusted upstream server outside the worker.

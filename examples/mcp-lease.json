@@ -1,0 +1,32 @@
+{
+  "version": "mvp-2",
+  "purpose": "Write a note, then ask before writing another",
+  "ttl_seconds": 3600,
+  "services": {
+    "notes": {
+      "adapter": "mcp",
+      "operations": {
+        "add": {
+          "method": "tools/call",
+          "params": {"name": "add_note", "arguments": {"notebook": "demo"}},
+          "input": "arguments",
+          "write": true
+        },
+        "guide": {
+          "method": "resources/read",
+          "params": {"uri": "notes://guide"},
+          "input": null,
+          "write": false
+        },
+        "prompt": {
+          "method": "prompts/get",
+          "params": {"name": "write_note"},
+          "input": "arguments",
+          "write": false
+        }
+      }
+    }
+  },
+  "capabilities": {"notes.add": 1, "notes.guide": 2, "notes.prompt": 1},
+  "limits": {"operations": 6, "write_operations": 2, "payload_bytes": 65536}
+}

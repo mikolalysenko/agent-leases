@@ -1,33 +1,41 @@
-# Security limits
+# Security boundary and limits
 
-The lease limits a worker's GitHub actions. It does not establish that code is correct or stop disclosure through an action you approved.
+The boundary applies to a whole command started through `lease launch` or `lease run`. A gateway alone, a tool allowlist, or an MCP frontend attached to a host agent does not isolate that agent.
 
-## Conditions for isolation
+## Network boundary
 
-- Run the **whole worker** through `lease run` on Linux with bubblewrap. Direct host commands and an MCP server alone do not isolate the parent agent. macOS has no sandbox fallback.
-- Keep the token and state outside the worker directory. Use a repo-scoped token in an operator-owned private file. Do not run the gateway as root.
-- Use a disposable repo with Actions disabled and no privileged integrations. Branches and draft PRs can trigger CI, webhooks, or later automation. The gateway does not enforce this repo configuration.
-- Start from an empty, private workspace. The launcher rejects existing symlinks, hard links, sockets, devices, and FIFOs. Do not let other host processes change its mounts or add sensitive files/sockets during a run.
-- Trust the host clock, database, kernel, bubblewrap, package, and system directories mounted read-only. Do not put credentials or service sockets in those system directories. Do not roll back a live lease database.
+Bubblewrap creates a private network namespace with no host network connection. The worker cannot use TCP, UDP, DNS, QUIC, SSH, host loopback, or a proxy on the host. Changing clients does not change that boundary: native `gh`, `git`, `curl`, raw sockets, hooks, and MCP subprocesses are all inside it.
 
-The sandbox clears the environment, hides the host home and state, closes inherited descriptors, detaches stdin, and creates separate mount, process, IPC, and network namespaces. The worker keeps its workspace, temporary directory, system tools, stdout/stderr, and the lease socket.
+The only service connection mounted into the worker is its lease Unix socket. The gateway accepts structured operations through that socket, validates them, and performs permitted calls through adapters. It does not forward arbitrary HTTP traffic. Direct `gh` calls fail even when the corresponding lease operation would be allowed.
 
-## What is enforced
+The host gateway and explicitly configured upstream MCP servers are outside this restriction. They are trusted service implementations, not worker subprocesses. An untrusted MCP server must run inside the worker boundary; do not configure it as a trusted gateway backend merely to give it network access.
 
-The worker cannot choose a different repo, overwrite a branch, merge, approve, or make arbitrary API calls. Per-operation and aggregate counters are reserved atomically. Repeated request IDs cannot cause another dispatch. Only locally recorded successful branches and PRs can be used by later write operations. Revocation and expiration stop subsequent dispatch authorizations.
+## Deployment conditions
 
-These guarantees depend on the gateway and sandbox remaining intact. A host process outside the sandbox may have its own network and credentials.
+- Linux and bubblewrap with suitable user namespaces are required. There is no macOS or unsandboxed execution fallback.
+- Keep state, configuration, tokens, adapter code, upstream server code and dependencies outside worker-writable paths. Gateway configuration is operator-owned mode `0600`; do not run the gateway as root.
+- Use a private workspace containing only ordinary files and directories. The launcher rejects existing symlinks, hard links, sockets, devices, and FIFOs. Other host processes must not change its contents or add sockets/credentials during a run.
+- Trust the kernel, clock, SQLite state, bubblewrap, package, adapters, and system directories mounted read-only. Those system directories must not contain sensitive credentials or service sockets.
+- For GitHub writes, use a disposable repository with Actions disabled and no privileged integrations. Repository settings are an operator prerequisite, not enforced by this MVP.
+
+The sandbox clears the environment, closes inherited descriptors, detaches stdin, hides host home/state, drops capabilities, and separates mount, process, IPC, and network namespaces. It retains the workspace, temporary files, system tools, stdout/stderr, and the lease socket. A caller outside this sandbox may still have its own credentials and network access.
+
+## What is bounded
+
+Per-operation and aggregate counters reserve attempts atomically. Repeated IDs cannot cause another dispatch. The worker cannot grant itself authority, answer its own questions, or select private connection settings. Revocation and expiration block future dispatch authorizations. GitHub resource ownership is checked per service in the lease.
+
+MCP fixed parameters cannot be replaced. However, a generic binding does not prove what a tool does. Its remaining input slot is unrestricted, and one call may cause many effects. Read/write classification is an explicit reviewed declaration. Use narrow tools and a trusted implementation; add a semantic adapter when you need stronger parameter or resource checks.
 
 ## What remains possible
 
-**Authorized disclosure.** A worker can put any data it has read into a permitted file, PR, or comment. Budgets bound attempts and input size, not the sensitivity or value of that data. There is no taint analysis or semantic purpose enforcement.
+**Authorized disclosure.** An allowed write can contain anything the worker can read. Prompts, questions, arguments, and service results can carry sensitive information. There is no taint analysis, data loss prevention, or semantic purpose enforcement.
 
-**External automation.** CI, notifications, webhooks, and later consumers of published code are outside the counters. Other GitHub users can change the base or a created branch. Repository names can be reassigned; operators must not rename or transfer the repo during a lease.
+**Effects outside a call.** CI, webhooks, notifications, asynchronous MCP tasks, and downstream consumers can continue after a lease ends. A timeout may follow a successful remote write. Inspect uncertain outcomes; reservations remain spent.
 
-**Partial work.** A timed-out write may have succeeded. Revocation cannot recall it or cancel already-triggered automation. Reservations remain spent. A person must reconcile uncertain outcomes.
+**Trusted-component compromise.** A gateway, plugin, upstream MCP server, token, or host compromise defeats its corresponding boundary. MCP initialization and server callbacks are not general sandboxing mechanisms. Server output is trusted to avoid exposing credentials; the gateway does not scrub arbitrary tool results.
 
-**Host compromise and resource exhaustion.** This shares the host kernel, has no dedicated seccomp profile or CPU/disk/process quotas, and is not a multi-tenant service. A worker can exhaust resources or spam the log. A compromised gateway, token file, operator, or kernel defeats the boundary.
+**Host resource exhaustion.** This shares the host kernel and has no dedicated seccomp profile or CPU/disk/process quotas. The operator inbox is rate-limited, but a worker can still spam other denials or exhaust resources. This is not a multi-tenant service.
 
-**Editable evidence.** Logs are local. Their hash chain cannot detect a fully rewritten or truncated history without an external checkpoint. Public `Lease:` stamps are attribution hints, not authenticated provenance.
+**Editable evidence.** A host operator can rewrite the database and local hash chain. Public `Lease:` stamps are attribution hints, not authenticated provenance. A host crash can leave uncertain attempts and a stale socket; restart recovery does not imply the lease was revoked at the time of the crash.
 
-See [testing](testing.md) for the actual interactions and boundary probes covered. Passing those tests is evidence for those cases, not a sandbox certification.
+Tests exercise real Linux isolation, controlled network receivers, and observed service effects. They are evidence for those cases, not a sandbox certification. See [testing](testing.md).

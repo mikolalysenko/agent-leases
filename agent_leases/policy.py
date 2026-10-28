@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import re
 
 OPERATIONS = ("read_file", "publish", "open_pr", "comment")
@@ -15,8 +16,14 @@ class Denied(Exception):
         super().__init__(rule)
 
 
+class UpstreamError(Exception):
+    def __init__(self, message, status=None):
+        self.status = status
+        super().__init__(message)
+
+
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
 
 def digest(value):
@@ -35,8 +42,14 @@ def parse_json(value):
     def constant(_):
         raise Denied("invalid", "non-finite JSON number")
 
+    def floating(value):
+        number = float(value)
+        if not math.isfinite(number):
+            constant(value)
+        return number
+
     try:
-        return json.loads(value, object_pairs_hook=pairs, parse_constant=constant)
+        return json.loads(value, object_pairs_hook=pairs, parse_constant=constant, parse_float=floating)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise Denied("invalid", "invalid JSON") from exc
 
@@ -77,75 +90,62 @@ def path(value, writing=False):
 
 
 def compile_policy(value):
-    fields(value, ("version", "purpose", "repo", "base", "base_sha", "ttl_seconds",
-                   "capabilities", "limits"))
-    if value["version"] != "mvp-1":
+    from .adapters import definitions
+    if not isinstance(value, dict):
+        raise Denied("invalid", "policy must be an object")
+    common = ("version", "purpose", "ttl_seconds", "capabilities", "limits")
+    if value.get("version") == "mvp-1":
+        fields(value, common + ("repo", "base", "base_sha"))
+        fields(value["capabilities"], OPERATIONS)
+    elif value.get("version") == "mvp-2":
+        fields(value, common + ("services",))
+        if not isinstance(value["services"], dict) or not 1 <= len(value["services"]) <= 16:
+            raise Denied("invalid", "policy requires 1–16 services")
+        for name, config in value["services"].items():
+            string(name, "service name", maximum=32, pattern=r"[a-z][a-z0-9_]*")
+            if not isinstance(config, dict):
+                raise Denied("invalid", "service must be an object")
+    else:
         raise Denied("invalid", "unsupported policy version")
     string(value["purpose"], "purpose")
-    string(value["repo"], "repo", maximum=200,
-           pattern=r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*")
-    base = string(value["base"], "base", maximum=100, pattern=r"[A-Za-z0-9_/-]+")
-    if any(not part for part in base.split("/")):
-        raise Denied("invalid", "invalid base")
-    string(value["base_sha"], "base_sha", maximum=40, pattern=r"[0-9a-f]{40}")
     integer(value["ttl_seconds"], "ttl_seconds", 1, 86400)
-    fields(value["capabilities"], OPERATIONS)
+    available = definitions(value)
+    caps = value["capabilities"]
+    if not isinstance(caps, dict) or not caps or caps.keys() - available.keys():
+        raise Denied("invalid", "capabilities must name adapter operations")
     fields(value["limits"], LIMITS)
-    for key, cap in {**value["capabilities"], **value["limits"]}.items():
+    for key, cap in {**caps, **value["limits"]}.items():
         integer(cap, key)
     return parse_json(canonical(value))
 
 
 def render(policy):
+    from .adapters import adapter_type, services
     policy = compile_policy(policy)
     lines = ["AGENT LEASE — compiled policy", "Policy SHA-256: " + digest(policy),
              "Agent's purpose (grants nothing): " + canonical(policy["purpose"]),
-             "Repository: " + policy["repo"],
-             "Read/publish parent: " + policy["base_sha"],
-             "Draft PR base: " + policy["base"],
              "Expires: %s seconds after approval" % policy["ttl_seconds"]]
-    lines += ["%s: at most %s attempts" % (op, policy["capabilities"][op])
-              for op in OPERATIONS]
+    for name, config in services(policy).items():
+        lines.append("Service: " + (name or "github") + " (" + config["adapter"] + ")")
+        kind = adapter_type(config["adapter"])
+        lines += kind.describe({k: v for k, v in config.items() if k != "adapter"})
+    lines += ["%s: at most %s attempts" % (op, cap) for op, cap in policy["capabilities"].items()]
     lines += ["%s: %s" % (key, policy["limits"][key]) for key in LIMITS]
-    lines += ["Publish creates a fresh lease/<id>/<request-id> branch; no ref updates.",
-              "Comments are limited to PRs this lease created.",
-              "Risk: writes may expose any data the worker can read.",
-              "Risk: branches and PRs can trigger CI, webhooks, and notifications.",
-              "Use a disposable repository with Actions disabled and no privileged integrations.",
+    lines += ["Risk: writes may expose any data the worker can read.",
               "Failed/uncertain attempts consume budget. In-flight writes cannot be recalled."]
     return "\n".join(lines)
 
 
-def validate_request(request):
+def validate_request(request, policy=None):
     fields(request, ("id", "operation", "params"))
     string(request["id"], "request id", maximum=64, pattern=r"[A-Za-z0-9_-]+")
-    op, params = request["operation"], request["params"]
-    if op not in OPERATIONS:
-        raise Denied("unknown_operation", "operation is not allowlisted")
-    if op == "read_file":
-        fields(params, ("path",))
-        path(params["path"])
-    elif op == "publish":
-        fields(params, ("files", "message"))
-        string(params["message"], "commit message", maximum=2000)
-        if not isinstance(params["files"], dict) or not 1 <= len(params["files"]) <= 50:
-            raise Denied("invalid", "publish requires 1–50 text files")
-        for name, content in params["files"].items():
-            path(name, writing=True)
-            string(content, "file contents", minimum=0, maximum=256 * 1024)
-        names = set(params["files"])
-        if any("/".join(name.split("/")[:i]) in names
-               for name in names for i in range(1, len(name.split("/")))):
-            raise Denied("invalid", "conflicting file paths")
-    elif op == "open_pr":
-        fields(params, ("branch", "title", "body"))
-        string(params["branch"], "branch", maximum=200, pattern=r"[A-Za-z0-9_/-]+")
-        string(params["title"], "title", maximum=200)
-        string(params["body"], "body", minimum=0, maximum=32000)
-    else:
-        fields(params, ("number", "body"))
-        integer(params["number"], "PR number", 1)
-        string(params["body"], "body", maximum=32000)
+    string(request["operation"], "operation", maximum=100, pattern=r"[a-z][a-z0-9_.]*")
+    if not isinstance(request["params"], dict):
+        raise Denied("invalid", "operation params must be an object")
+    if policy is not None:
+        from .adapters import binding
+        spec = binding(policy, request["operation"])
+        spec["kind"].validate(spec["options"], spec["local_name"], request["params"])
     return request
 
 

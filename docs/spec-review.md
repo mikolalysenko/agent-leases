@@ -1,6 +1,6 @@
 # Review of the v0.2 proposal
 
-The useful core is simple: approve a bounded task, keep credentials outside the worker, and enforce the budget at the gateway. The implementation keeps that core and leaves broader integrations for later.
+The useful core is simple: approve a bounded task, keep credentials outside the worker, and enforce the budget at the gateway. The implementation keeps that core. Version 0.3 moves service behavior into adapters and adds the missing sandbox launch and operator request flow.
 
 These are the changes the original spec needs before its stronger promises can hold.
 
@@ -23,6 +23,10 @@ This prototype requires a disposable repo with Actions disabled and no privilege
 ## Keep the first API small
 
 A transparent Git/REST/GraphQL proxy has to understand every accepted request form, redirect, credential location, and write path. That is a large security surface. Four named operations provide a useful workflow with much less machinery. Fresh branches also avoid ref-update and force-push rules.
+
+Those four operations belong in a GitHub adapter, not in the lease engine. Other services can use their own adapters; explicit MCP bindings cover tools, resources, prompts, and other request methods. A generic MCP call is one budgeted attempt, not a guarantee about every effect the server causes. Trusted server code and semantic resource checks remain necessary.
+
+The execution boundary should be concrete: launch the whole command in a network-isolated sandbox, expose only the gateway socket, and give the worker a request/answer channel. This blocks native clients as well as agent tools. Transparent native-client compatibility and full MCP protocol coverage are separate features, not prerequisites for that boundary.
 
 The source spec's proposed ruleset excludes `lease/**`; that same rule cannot block force pushes on the excluded branches. Separate rules would be required if ref updates are later supported.
 

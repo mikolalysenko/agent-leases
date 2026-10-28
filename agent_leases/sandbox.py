@@ -3,17 +3,23 @@
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 
 
-def command(socket_path, workspace, argv):
+def check_platform():
     if sys.platform != "linux":
         raise ValueError("sandbox execution requires Linux and bubblewrap; there is no unsandboxed fallback")
     bwrap = shutil.which("bwrap")
     if not bwrap:
         raise ValueError("install bubblewrap before running a worker")
+    return bwrap
+
+
+def command(socket_path, workspace, argv):
+    bwrap = check_platform()
     endpoint = Path(socket_path).resolve(strict=True)
     work = Path(workspace).resolve(strict=True)
     source = Path(__file__).resolve().parent
@@ -53,3 +59,36 @@ def run(socket_path, workspace, argv):
     # Detached stdin removes a host-controlled input stream and terminal ioctl surface.
     return subprocess.run(command(socket_path, workspace, argv), env={}, close_fds=True,
                           stdin=subprocess.DEVNULL).returncode
+
+
+def launch(store, config, workspace, argv):
+    """Own the gateway and worker together; revoke and stop both on every exit."""
+    from .gateway import serving
+    worker = None
+    try:
+        with serving(store, config) as endpoint:
+            args = command(endpoint, workspace, argv)
+            print("Gateway ready: " + str(endpoint), flush=True)
+            print("Operator inbox: lease inbox --state " + str(store.directory), flush=True)
+            worker = subprocess.Popen(args, env={}, close_fds=True, stdin=subprocess.DEVNULL,
+                                      start_new_session=True)
+            try:
+                while True:
+                    try:
+                        return worker.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        if store.status()["state"] != "active":
+                            print("Lease ended; stopping worker.", flush=True)
+                            return 1
+            finally:
+                store.revoke()
+                if worker.poll() is None:
+                    try:
+                        os.killpg(worker.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                worker.wait()
+    finally:
+        # Includes startup failures before the worker exists.
+        if worker is None:
+            store.revoke()

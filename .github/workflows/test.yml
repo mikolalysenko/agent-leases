@@ -19,7 +19,7 @@ jobs:
       - name: Install sandbox
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap gh curl
           # This disposable runner tests unprivileged namespaces directly.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test gateway and real Linux boundary
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: mikolalysenko/permission-matrix
-          ref: 13418a30e2fc5b51480466f6d856e944165585e8
+          ref: c409db55a24dfab2d4908d9a96d07370e148c652
           path: permission-matrix
           persist-credentials: false
       - name: Install sandbox

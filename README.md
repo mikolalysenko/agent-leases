@@ -1,88 +1,79 @@
 # Agent Leases
 
-**Give an agent a GitHub task budget. Keep control of what it can do.**
+**Approve a task budget. Let the agent work within it.**
 
-Approve a task such as: “Read this repo, publish one change, and open one draft PR within an hour.” The agent can work within that budget without asking about every action. When it runs out, you can add more. When you revoke the lease, new requests stop.
+Give a command permission to do a small job: read these files, publish one change, or call an MCP tool five times. A gateway enforces that budget and keeps credentials outside the command. The agent can ask for more, but only you can approve it.
 
-A small gateway holds your GitHub token and performs the allowed operations. The worker receives a socket to that gateway. The limits live outside the agent, so changing its prompt or running another script does not increase its budget.
+```text
+You approve a lease
+        │
+        ▼
+Sandboxed command ── lease socket ── Gateway ── Service adapters
+  agent + its children               budgets    GitHub, MCP, your plugin
+  no direct network                  inbox      credentials stay here
+```
 
-## Try it
+The sandbox covers the whole process tree. `gh`, `curl`, a script, and an MCP subprocess all have the same restriction: no direct network access. Approved operations go through the gateway.
 
-Python 3.9 or newer. No runtime dependencies or credentials needed for the demo:
+## Run the complete example
+
+The [sandbox walkthrough](docs/quickstart.md) starts a gateway and an isolated worker with one command:
+
+```sh
+lease launch examples/mcp-lease.json \
+  --config gateway.json --workspace work --state .lease \
+  -- python3 worker.py
+```
+
+The example uses a small MCP notes service. The worker asks what to write, saves one note, hits its budget, then asks for one more. You answer from another terminal:
+
+```sh
+lease inbox
+lease answer note-text "Hello from the operator"
+lease decide one-more approve
+```
+
+`launch` shows the policy for approval, starts the gateway, runs the command in Linux bubblewrap, and closes the lease when the command finishes. Revoking or expiring the lease stops the supervised worker too. Use a fresh state directory for each run.
+
+Linux, Python 3.9+, and bubblewrap are required for isolation. The gateway has no Python runtime dependencies. For a simulated introduction that also runs on macOS:
 
 ```sh
 python3 -m agent_leases demo
 ```
 
-The demo walks through approval, a successful publish, a refused extra publish, a small budget increase, and revocation. GitHub is simulated; nothing is uploaded.
+## Use it with your own command
 
-## Four things a worker can do
-
-```sh
-lease read README.md
-lease publish test.py --message "Fix the flaky test"
-lease pr BRANCH --title "Fix the flaky test"
-lease comment PR_NUMBER "Tests pass"
-```
-
-Publishing creates a fresh lease branch. PRs are always drafts. Comments can only go on PRs this lease created. There is no merge, approval, force-push, or arbitrary HTTP operation.
-
-Identical commands return their recorded result. Repeating a command after a lost response does not spend another budget unit or create another write. Use `--id new-name` only when you deliberately want a new attempt.
-
-## Set it up
-
-Install the command from this checkout:
+Replace `python3 worker.py` with your agent or command. Put its task files in the workspace. Inside the sandbox it can use:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -e .
-. .venv/bin/activate
+python3 -m agent_leases status --json
+python3 -m agent_leases catalog
+python3 -m agent_leases call notes.add --params '{"text":"Done"}'
+python3 -m agent_leases ask "Which test suite should I run?" --id tests
+python3 -m agent_leases request notes.add 1 --reason "One more note" --id more
+python3 -m agent_leases wait more
 ```
 
-Save a GitHub token in a private file outside the worker's directory (`chmod 600 TOKEN_FILE`). Scope it to one disposable repository with Contents and Pull requests write access. Disable Actions and privileged integrations on that repo: a branch or PR can otherwise run code outside the lease.
+Agents that use MCP can start `python3 -m agent_leases mcp` inside the sandbox. It exposes the approved operations plus status, question, request, and polling tools. Neither interface exposes approval.
 
-Create a policy using a reviewed commit's full SHA, inspect it, and approve it:
+Native `gh` and cloud-model clients do **not** gain transparent network access. Use lease operations for permitted service calls. A networked agent also needs an explicit integration for its model; this version does not provide a model proxy. See [agent setup](docs/agents.md).
 
-```sh
-lease init OWNER/REPO --commit COMMIT_SHA > policy.json
-lease approve policy.json
-lease serve --token-file /private/path/github-token
-```
+## Add a service
 
-The starter policy grants one publish, one draft PR, two comments, twenty file reads, and one hour. Edit `policy.json` before approval to change those limits. The gateway stores the approved policy and counters in `.lease/`.
+The core handles approval, counters, request IDs, revocation, and the inbox. Adapters handle service behavior:
 
-In another terminal on Linux, start a worker in an empty directory:
+- **GitHub:** pinned file reads, new lease branches, draft PRs, and comments on PRs created by the lease.
+- **MCP:** explicit bindings to a trusted stdio server's tools, resources, prompts, or other request methods. Each binding fixes the method and selected parameters, with its own cap.
+- **Plugins:** an installed Python adapter can add another protocol without changing the gateway, store, CLI, or MCP frontend.
 
-```sh
-mkdir work
-lease run --workspace work -- python3 -m agent_leases read README.md
-```
+One lease can combine services. Worker permissions live in the policy; server commands and credential settings live in a separate operator configuration. [Adapter guide and examples](docs/adapters.md).
 
-`lease run` uses bubblewrap to give the worker its workspace and lease socket, with no Internet or access to the token/state files. It can run a local worker script the same way. Cloud-model connectivity is not included. Direct host commands are useful for development, but only the Linux launcher establishes this isolation.
+## What the budget means
 
-## Stay in control
+Counters reserve **attempts** before dispatch. Failed or uncertain attempts remain charged. Repeating the same request ID returns its recorded result. The combined limits cover operation attempts, declared writes, input bytes, and elapsed time.
 
-```sh
-lease status             # remaining budget and time
-lease grant comment 1    # approve one extra comment
-lease revoke             # stop new requests
-lease audit              # inspect the log
-```
+A service can cause more than one effect per call. MCP servers and adapters run on the trusted side: their implementation must honor the scope you approved. Revocation stops new dispatches; it cannot recall an operation already sent.
 
-A grant changes one limit. Other limits and the expiration stay in place. Revocation cannot recall requests already sent to GitHub. Failed or uncertain writes keep their budget reservation; inspect GitHub before replacing an uncertain attempt.
-
-## For agents and scripts
-
-Add `--json` to worker commands for structured results. Or run `lease mcp` for five discoverable MCP tools: status and the four operations above. Both use the same gateway and budgets. Neither exposes approval or budget increases.
-
-See [agent setup](docs/agents.md) for MCP configuration, request IDs, and how to handle denials.
-
-## What this version covers
-
-One repo, one lease, four operations, persistent budgets, a token kept outside the worker, and Linux worker isolation. It does not meter dollars, connect a model, manage subagents, or make generated code trustworthy. macOS supports gateway/client development; sandboxed workers require Linux and bubblewrap.
-
-The [permission-matrix suite](docs/testing.md) compares CLI, socket, and MCP behavior, then repeats those interactions inside the Linux sandbox. It observes provider calls as well as returned errors.
-
-[How it works](docs/design.md) · [Security limits](docs/security.md) · [Spec review](docs/spec-review.md) · [Work log](docs/work-log.md)
+This is an experimental single-host MVP. It does not meter dollars, manage subagents, inspect intent, or make approved writes safe. [Security limits](docs/security.md) · [Tests](docs/testing.md) · [Design](docs/design.md) · [Spec review](docs/spec-review.md) · [Work log](docs/work-log.md).
 
 MIT licensed.

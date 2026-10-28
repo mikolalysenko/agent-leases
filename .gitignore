@@ -4,7 +4,10 @@ __pycache__/
 .venv/
 build/
 dist/
-.lease/
+.lease*/
+gateway.json
+work/
+notes-data/
 *.pem
 *.key
 *.sqlite*

@@ -1,65 +1,115 @@
-# Using a lease from an agent
+# Agent and command interface
 
-Start with `lease status --json`. It shows the repo, expiration, and each remaining budget. Use the worker commands for the task. Approval, grants, and revocation belong to the operator.
+Launch the whole agent with [the sandbox workflow](quickstart.md). Inside it, `python3 -m agent_leases` is available and `LEASE_SOCKET` is already set. The host-side `lease` executable may live in a virtual environment that is not mounted inside the sandbox.
 
-## CLI
-
-```sh
-lease read README.md --json
-lease publish test.py --message "Fix test" --json
-lease pr RETURNED_BRANCH --title "Fix test" --body "Checked locally" --json
-lease comment RETURNED_PR_NUMBER "Tests pass" --json
-```
-
-`publish` reads local text files. Run it from the worker workspace with relative file names. Use the returned branch for `pr`, then the returned number for `comment`.
-
-Inside `lease run`, invoke `python3 -m agent_leases` in place of `lease`; the package and socket are provided automatically. Outside it, set `LEASE_SOCKET` or pass `--socket PATH` if the default `.lease/gateway.sock` is elsewhere.
-
-For programmatic file contents, use the same operation through JSON:
+## Discover and act
 
 ```sh
-lease call publish --params '{"files":{"test.txt":"fixed\n"},"message":"Fix test"}'
+python3 -m agent_leases status --json
+python3 -m agent_leases catalog
+python3 -m agent_leases call notes.add --params '{"text":"Finished the tests"}'
 ```
 
-All worker operations return the same JSON shape with `--json` (and always for `call`):
+The catalog comes from the approved adapters. `call` works with every registered operation and always returns JSON. `--params-file FILE` reads larger arguments; `--params-file -` reads stdin.
 
 ```json
-{"ok":true,"result":{"branch":"lease/ID/REQUEST_ID","sha":"..."}}
+{"ok":true,"result":{"content":[{"type":"text","text":"Note saved."}]}}
 ```
 
-A refusal has `ok: false`, `error.code`, `error.rule`, and `retryable: false`. A budget refusal also includes `used`, `left`, `needed`, and a suggested next step. The process exits with status 1 on refusal.
+A refusal has `ok: false`, `error.code`, `error.rule`, and `retryable: false`. A budget refusal also includes `used`, `left`, and `needed`. The CLI exits with status 1 on refusal.
+
+For the original GitHub policy, convenience commands remain available: `read`, `publish`, `pr`, and `comment`. In a modular policy, use names such as `github.read_file` or `github.open_pr` from the catalog. [GitHub setup](adapters.md#github).
+
+## Ask the operator
+
+The control channel remains available when an operation budget is exhausted:
+
+```sh
+python3 -m agent_leases ask "Which test suite should I run?" --id tests --json
+python3 -m agent_leases wait tests --poll --json
+```
+
+`--poll` checks once. Without it, `wait` polls until the operator answers or the lease closes. The answer is data, not a grant:
+
+```json
+{"ok":true,"result":{"id":"tests","state":"answered","request":{"id":"tests","kind":"ask","message":"Which test suite should I run?"},"answer":{"decision":"answer","message":"Run unit tests","granted":0}}}
+```
+
+To request more of a specific budget:
+
+```sh
+python3 -m agent_leases request notes.add 1 --reason "Need one more note" --id more --json
+python3 -m agent_leases wait more --json
+```
+
+The operator uses `lease inbox`, `lease answer`, or `lease decide` outside the sandbox. A request can be approved in full, approved for fewer units, or denied. It never changes other caps, service scope, or expiration. Check `answer.decision` and `answer.granted` before continuing. A closed lease ends pending requests.
+
+There are at most three new questions or budget requests per hour. Repeating an identical request ID returns the existing request without consuming another slot. An already-denied operation must be explicitly retried after approval; the gateway does not queue automatic effects.
 
 ## MCP
 
-Configure a stdio server in your MCP client:
+Start this stdio server **inside the sandbox**, as a child of the agent:
 
 ```json
 {
   "mcpServers": {
     "leases": {
-      "command": "lease",
-      "args": ["mcp", "--socket", "/absolute/path/.lease/gateway.sock"]
+      "command": "python3",
+      "args": ["-m", "agent_leases", "mcp"]
     }
   }
 }
 ```
 
-The server exposes `lease_status`, `lease_read_file`, `lease_publish`, `lease_open_pr`, and `lease_comment`, with parameter schemas and descriptions. Tool results carry both JSON text and `structuredContent`; refusals set `isError: true`. No token is given to the MCP client.
+The frontend exposes four control tools:
 
-The MCP server is a socket client, not a sandbox for its parent agent. For isolation, launch the whole worker with `lease run` and start MCP as a child inside it. The worker still needs a local model or an integration supplying its work; this project does not provide model network access.
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `lease_status` | none | Policy, remaining budgets, time |
+| `lease_ask` | `message`, optional `request_id` | A question ID |
+| `lease_request` | `cap`, `amount`, `message`, optional `request_id` | A budget request ID |
+| `lease_poll` | `id` | Pending state or operator answer |
+
+It also generates a tool for each permitted service operation. For example:
+
+```json
+{"name":"lease_notes.add","arguments":{"params":{"text":"Done"},"request_id":"note-1"}}
+```
+
+Modular service tools wrap adapter arguments under `params`; this keeps upstream fields separate from the lease's `request_id`. The original GitHub tools keep their flat argument format for compatibility. Tool results include JSON text and `structuredContent`; refusals set `isError: true`.
+
+The frontend never exposes grant, approval, revoke, arbitrary server selection, or raw network access. MCP is an interface to the gateway, not a sandbox for an agent running on the host.
 
 ## Retries and refusals
 
-Identical operation parameters get the same request ID across CLI and MCP. Repeating them returns the recorded result without another GitHub call. Raw socket callers must supply an ID. For an intentional new attempt, use CLI `--id` or MCP `request_id`. Never generate a fresh ID just to retry an uncertain write.
+CLI and MCP derive stable default IDs from the operation and parameters. Repeating them returns the recorded result without another dispatch. Use CLI `--id` or MCP `request_id` only for a deliberate new attempt. Raw socket callers must supply their own ID.
 
 | Code | Next step |
 | --- | --- |
-| `limit` | Ask the operator for the specific missing budget. Other available work can continue. |
-| `scope`, `invalid`, `unknown_operation` | Correct the request or stay within the approved task. |
-| `conflict` | An explicit request ID was reused with different parameters; inspect the original request. |
-| `upstream` | GitHub rejected a request. The attempt is charged; inspect the HTTP status and any earlier steps. |
-| `uncertain` | A write may have happened. Stop that action and ask the operator to inspect GitHub. |
-| `expired`, `revoked` | Stop using the lease. Only the operator can approve a new one. |
-| `unavailable` | The gateway or its state could not be reached. Keep the same request ID when checking again. |
+| `limit` | Request the missing cap; continue other permitted work. |
+| `scope`, `invalid`, `unknown_operation` | Correct the request or stay within the approved scope. |
+| `conflict` | The ID has different contents, or the reviewed policy changed. Inspect before continuing. |
+| `upstream` | The service rejected the operation. The attempt remains charged. |
+| `uncertain` | An effect may have happened. Ask the operator to inspect it; do not create a fresh ID to retry. |
+| `expired`, `revoked` | Stop using the lease. |
+| `unavailable` | Inspect the gateway. Keep the same operation ID when checking again. |
 
-The same rules apply when using a shell, a subprocess, or another agent tool. None can extend the lease through the worker socket.
+## Raw socket
+
+One JSON line per connection, at most 1 MiB:
+
+```json
+{"id":"note-1","operation":"notes.add","params":{"text":"Done"}}
+```
+
+Control messages:
+
+```json
+{"operation":"status"}
+{"operation":"catalog"}
+{"operation":"submit","request":{"id":"q","kind":"ask","message":"Which tests?"}}
+{"operation":"submit","request":{"id":"more","kind":"more","cap":"notes.add","amount":1,"message":"One more note"}}
+{"operation":"poll","request_id":"more"}
+```
+
+The socket identifies one lease; there is no bearer token or signed token to manage. Possession of the socket grants that lease's worker permissions.

@@ -1,5 +1,27 @@
 # Work log
 
+## Modular adapters and complete command workflow — v0.3
+
+Service behavior now lives in adapters. A modular policy can combine GitHub,
+explicit MCP request bindings, and installed Python plugins. The gateway, counters,
+and MCP frontend discover their operations rather than maintaining a GitHub tool
+list. The existing single-GitHub policy remains compatible.
+
+`lease launch` now owns approval, gateway startup, sandbox execution, and cleanup.
+The worker can submit a question or a narrow budget request, poll for the answer,
+and retry a refused operation after approval. Only local operator commands can
+answer or grant. Requests persist, accept partial grants, and have a spam limit.
+
+The README, sandbox walkthrough, agent instructions, adapter contract, design,
+and security boundary were rewritten around an executable two-terminal example.
+Direct native-client traffic remains blocked. Transparent `gh` forwarding and
+cloud-model connectivity are explicitly outside this version.
+
+Local verification passed 50 tests, with eight Linux integrations deferred to CI,
+and 178 permission-matrix checks across CLI, socket, and MCP with no gaps or
+unknowns. The new matrix extension was isolated from the user's other working-tree
+changes. Linux results are recorded below after the published run completes.
+
 ## Simplification and permission-matrix integration
 
 The tool now uses one operator-supplied GitHub token file. Token issuance, signing, caching, and refresh machinery were removed.

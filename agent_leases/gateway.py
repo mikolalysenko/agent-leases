@@ -1,94 +1,81 @@
-"""Four operations, one socket, one lease. Administrative operations are local only."""
+"""One policy boundary for every adapter. Administrative operations are local only."""
 
-import base64
+from contextlib import contextmanager
 import fcntl
 import socket
 import socketserver
 import threading
-from urllib.parse import quote
 
-from .github import UpstreamError
-from .policy import (Denied, MAX_MESSAGE, canonical, digest, fields, parse_json,
+from .adapters import binding, catalog, connect
+from .policy import (Denied, UpstreamError, MAX_MESSAGE, canonical, digest, fields, parse_json,
                      validate_request)
 
 
+class Context:
+    def __init__(self, store, request, service):
+        self.store, self.request, self.service = store, request, service
+        self.lease = store.status()
+
+    def dispatch(self, method, resource):
+        self.store.dispatch(self.request["id"], method, resource)
+
+
 class Gateway:
-    def __init__(self, store, github):
-        self.store, self.github = store, github
-        # Serialize operations, keeping the broker and multi-step publishes simple.
-        # Admin revocation/grants use independent SQLite transactions.
+    def __init__(self, store, config):
+        self.store = store
+        self.adapters = connect(store.status()["policy"], config)
         self.lock = threading.Lock()
+
+    def close(self):
+        for adapter in self.adapters.values():
+            adapter.close()
 
     def handle(self, request):
         try:
-            if isinstance(request, dict) and request.get("operation") == "status":
-                fields(request, ("operation",))
-                return {"ok": True, "result": self.store.status()}
-            validate_request(request)
+            if isinstance(request, dict):
+                control = request.get("operation")
+                if control in ("status", "catalog"):
+                    fields(request, ("operation",))
+                    result = self.store.status()
+                    if control == "catalog":
+                        result = catalog(result["policy"])
+                    return {"ok": True, "result": result}
+                if control == "submit":
+                    fields(request, ("operation", "request"))
+                    return {"ok": True, "result": self.store.submit(request["request"])}
+                if control == "poll":
+                    fields(request, ("operation", "request_id"))
+                    return {"ok": True, "result": self.store.inbox(request["request_id"])}
+            validate_request(request, self.store.status()["policy"])
             with self.lock:
                 cached = self.store.reserve(request)
                 if cached is not None:
                     return cached
                 try:
                     result, owned = self.execute(request)
+                    if len(canonical(result).encode()) > MAX_MESSAGE:
+                        raise ValueError("adapter response is too large")
                     response = {"ok": True, "result": result}
                 except Denied as exc:
                     response, owned = self.store.denial(exc), None
                 except UpstreamError as exc:
                     error = Denied("upstream" if exc.status else "uncertain",
-                                   str(exc) if exc.status else "GitHub connection failed; inspect GitHub before new work")
+                                   str(exc) if exc.status else "connection failed; inspect the service before new work")
                     response, owned = self.store.denial(error), None
                 except Exception:
-                    # A timeout, bad response, or even a crash after a POST can mean
-                    # the write succeeded. Preserve the reservation and never replay.
                     response, owned = self.store.denial(Denied(
-                        "uncertain", "upstream operation failed; inspect GitHub before new work")), None
+                        "uncertain", "upstream operation failed; inspect the service before new work")), None
                 self.store.finish(request, response, owned)
                 return response
         except Denied as exc:
             return self.store.denial(exc)
 
     def execute(self, request):
-        lease = self.store.status()
-        policy, op, params = lease["policy"], request["operation"], request["params"]
-        repo = policy["repo"]
-        root = "/repos/" + repo
-        def call(method, suffix, data=None):
-            self.store.dispatch(request["id"], method, root + suffix)
-            return self.github.request(method, root + suffix, data)
-
-        stamp = "\n\nLease: %s\nLease-Request: %s" % (lease["id"], request["id"])
-        if op == "read_file":
-            result = call("GET", "/contents/" + quote(params["path"], safe="/")
-                          + "?ref=" + policy["base_sha"])
-            if not isinstance(result, dict) or result.get("encoding") != "base64":
-                raise ValueError("only small, ordinary files are supported")
-            content = base64.b64decode(result["content"].replace("\n", ""), validate=True)
-            if result.get("type") != "file" or len(content) > 256 * 1024:
-                raise ValueError("only small, ordinary files are supported")
-            return {"path": params["path"], "content": content.decode("utf-8")}, None
-        if op == "publish":
-            parent = call("GET", "/git/commits/" + policy["base_sha"])
-            tree = call("POST", "/git/trees", {
-                "base_tree": parent["tree"]["sha"],
-                "tree": [{"path": name, "mode": "100644", "type": "blob", "content": content}
-                         for name, content in sorted(params["files"].items())]})
-            commit = call("POST", "/git/commits", {
-                "message": params["message"] + stamp, "tree": tree["sha"],
-                "parents": [policy["base_sha"]]})
-            branch = "lease/%s/%s" % (lease["id"], request["id"])
-            call("POST", "/git/refs", {"ref": "refs/heads/" + branch, "sha": commit["sha"]})
-            return {"branch": branch, "sha": commit["sha"]}, ("branch", branch)
-        if op == "open_pr":
-            result = call("POST", "/pulls", {"head": params["branch"], "base": policy["base"],
-                          "title": params["title"], "body": params["body"] + stamp,
-                          "draft": True, "maintainer_can_modify": False})
-            number = result["number"]
-            if type(number) is not int or number < 1:
-                raise ValueError("invalid upstream PR number")
-            return {"number": number, "url": "https://github.com/%s/pull/%d" % (repo, number)}, ("pr", str(number))
-        call("POST", "/issues/%d/comments" % params["number"], {"body": params["body"] + stamp})
-        return {"number": params["number"], "commented": True}, None
+        spec = binding(self.store.status()["policy"], request["operation"])
+        context = Context(self.store, request, spec["service"])
+        # The core authorizes entry; adapters also check before each external effect.
+        context.dispatch("adapter", request["operation"])
+        return self.adapters[spec["service"]].execute(context, spec["local_name"], request["params"])
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -140,7 +127,8 @@ class Handler(socketserver.StreamRequestHandler):
         self.wfile.write((canonical(response) + "\n").encode())
 
 
-def serve(store, github):
+@contextmanager
+def serving(store, config):
     # Lock before recovery: a second server must not mark live work uncertain.
     with (store.directory / "gateway.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -151,13 +139,26 @@ def serve(store, github):
             if not address.is_socket():
                 raise ValueError("gateway.sock exists and is not a socket")
             address.unlink()
-        with Server(str(address), Gateway(store, github)) as server:
-            address.chmod(0o600)
-            print("Gateway ready: " + str(address), flush=True)
-            try:
-                server.serve_forever()
-            finally:
-                address.unlink(missing_ok=True)
+        gateway = Gateway(store, config)
+        try:
+            with Server(str(address), gateway) as server:
+                address.chmod(0o600)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    yield address
+                finally:
+                    server.shutdown()
+                    thread.join()
+        finally:
+            gateway.close()
+            address.unlink(missing_ok=True)
+
+
+def serve(store, config):
+    with serving(store, config) as address:
+        print("Gateway ready: " + str(address), flush=True)
+        threading.Event().wait()
 
 
 def client(address, request):

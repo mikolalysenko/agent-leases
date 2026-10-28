@@ -5,13 +5,7 @@ import os
 from pathlib import Path
 import stat
 
-from .policy import Denied, canonical, parse_json
-
-
-class UpstreamError(Exception):
-    def __init__(self, message, status=None):
-        self.status = status
-        super().__init__(message)
+from .policy import Denied, UpstreamError, canonical, parse_json
 
 
 def private_file(filename):

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_leases.cli import parser, worker_request
+from agent_leases.adapters import catalog
 from agent_leases.gateway import operation_request
 from agent_leases.mcp import Session
 from agent_leases.policy import Denied, starter_policy
@@ -41,6 +42,7 @@ class InterfaceTests(unittest.TestCase):
     def test_mcp_forwards_only_worker_calls_and_returns_the_structured_denial(self):
         session = Session('/unused')
         self.initialize(session)
+        session.catalog = catalog(starter_policy('owner/repo', 'a' * 40))
         denial = {'ok': False, 'error': {'code': 'limit', 'rule': 'read_file exhausted', 'retryable': False}}
         request = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {
             'name': 'lease_read_file', 'arguments': {'path': 'README.md'}, '_meta': {'progressToken': 'x'}}}

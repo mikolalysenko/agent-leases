@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-leases"
-version = "0.2.0"
-description = "Give an agent a GitHub task budget and keep its token outside the worker"
+version = "0.3.0"
+description = "Run a command with a task budget, service adapters, and an isolated gateway"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{name = "Mikola Lysenko"}]
