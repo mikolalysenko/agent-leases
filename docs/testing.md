@@ -6,7 +6,7 @@ The unit suite checks the policy, SQLite counters, transport, and interfaces:
 python3 -m unittest discover -v
 ```
 
-[Permission Matrix](https://github.com/mikolalysenko/permission-matrix) tests the running system through separate worker processes:
+[Permission Matrix](https://github.com/mikolalysenko/permission-matrix) tests the running system through separate worker processes. The adapter is in [PR #1](https://github.com/mikolalysenko/permission-matrix/pull/1); until it is merged, use its `agent-leases-adapter` branch. From a checkout containing that adapter:
 
 ```sh
 cd ../permission-matrix
