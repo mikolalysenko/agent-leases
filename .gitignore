@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.lease/
+*.pem
+*.key
+*.sqlite*
+*.sock
+.DS_Store

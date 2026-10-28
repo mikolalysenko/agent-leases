@@ -1,0 +1,6 @@
+{
+  "message": "Add a lease demonstration",
+  "files": {
+    "lease-demo.txt": "This change was published through a counted agent lease.\n"
+  }
+}

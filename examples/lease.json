@@ -1,0 +1,19 @@
+{
+  "version": "mvp-1",
+  "purpose": "Fix a test in a disposable repository",
+  "repo": "example/lease-playground",
+  "base": "main",
+  "base_sha": "0123456789abcdef0123456789abcdef01234567",
+  "ttl_seconds": 3600,
+  "capabilities": {
+    "read_file": 20,
+    "publish": 1,
+    "open_pr": 1,
+    "comment": 2
+  },
+  "limits": {
+    "operations": 24,
+    "write_operations": 4,
+    "payload_bytes": 1048576
+  }
+}

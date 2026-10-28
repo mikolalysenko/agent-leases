@@ -1,0 +1,35 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          # This disposable runner tests unprivileged namespaces directly.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Test gateway and real Linux boundary
+        env:
+          LEASE_REQUIRE_SANDBOX: '1'
+        run: python3 -m unittest discover -v
+      - name: Run offline demonstration
+        run: python3 -m examples.demo
+      - name: Check packaging and CLI
+        run: |
+          python3 -m venv /tmp/lease-package-test
+          /tmp/lease-package-test/bin/pip install .
+          /tmp/lease-package-test/bin/lease --help
