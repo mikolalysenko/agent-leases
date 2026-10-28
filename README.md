@@ -2,6 +2,8 @@
 
 **Approve a task budget. Let the agent work within it.**
 
+The next design separates the lease from its runtime: [portable leases and an OpenShell integration proposal](docs/portable-leases.md). It is a proposal; the implementation below remains the working prototype.
+
 Give a command permission to do a small job: read these files, publish one change, or call an MCP tool five times. A gateway enforces that budget and keeps credentials outside the command. The agent can ask for more, but only you can approve it.
 
 ```text
