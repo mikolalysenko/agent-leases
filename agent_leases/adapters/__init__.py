@@ -2,7 +2,7 @@
 
 from importlib.metadata import entry_points
 
-from ..policy import Denied, fields, string
+from ..policy import Denied, string
 
 
 def adapter_type(name):

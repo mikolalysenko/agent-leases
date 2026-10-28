@@ -17,10 +17,26 @@ and security boundary were rewritten around an executable two-terminal example.
 Direct native-client traffic remains blocked. Transparent `gh` forwarding and
 cloud-model connectivity are explicitly outside this version.
 
-Local verification passed 50 tests, with eight Linux integrations deferred to CI,
-and 178 permission-matrix checks across CLI, socket, and MCP with no gaps or
-unknowns. The new matrix extension was isolated from the user's other working-tree
-changes. Linux results are recorded below after the published run completes.
+Verification of the implementation at `043f128`:
+
+- [Linux CI](https://github.com/mikolalysenko/agent-leases/actions/runs/40687522109)
+  passed all 58 unit/integration tests, including the complete two-terminal
+  walkthrough and the native `gh`, `curl`, and MCP network-boundary checks.
+- **395 permission-matrix checks across 79 cases and six paths passed**, with no
+  gaps or unknowns. The downloaded report matched the full declared inventory.
+  Every cell had an observed control and saved evidence; budget ceilings, service
+  scope, audit chains, and effects after partial approvals were checked separately.
+- [Permission Matrix's own Linux run](https://github.com/mikolalysenko/permission-matrix/actions/runs/40687580864)
+  also passed. The [request-flow extension](https://github.com/mikolalysenko/permission-matrix/pull/2)
+  was isolated from the user's other working-tree changes.
+- Fresh-package installation and the offline demo passed on Linux. The host-only
+  matrix passed 178 checks on macOS; it is not used as evidence for isolation.
+
+A follow-up review added checks for ownership across service aliases, malformed
+MCP responses after effects, denied server callbacks, and adapter shutdown.
+Gateway shutdown now refuses queued operations before closing adapters, so a
+queued call cannot restart an upstream connection. All 62 tests pass locally
+apart from the eight Linux-only checks, which run in CI.
 
 ## Simplification and permission-matrix integration
 

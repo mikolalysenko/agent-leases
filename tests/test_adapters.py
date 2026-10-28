@@ -1,4 +1,3 @@
-import copy
 import json
 from pathlib import Path
 import sys
@@ -11,6 +10,7 @@ from agent_leases.gateway import Gateway, client, operation_request, serving
 from agent_leases.mcp import Session
 from agent_leases.policy import Denied, compile_policy, fields, render
 from agent_leases.store import Store
+from tests.fake_github import FakeGitHub
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -185,3 +185,24 @@ class AdapterTests(unittest.TestCase):
                 self.assertFalse(client(address, operation_request('notes.add', {'text': 'no'}))['ok'])
             self.assertFalse(address.exists())
         self.assertEqual(effects, [('approved', 'one')])
+
+    def test_github_resource_ownership_is_scoped_to_each_service(self):
+        policy = mcp_policy()
+        scope = {'adapter': 'github', 'repo': 'owner/repo', 'base': 'main', 'base_sha': 'a' * 40}
+        policy['services'].update(first=scope, second=scope)
+        policy['capabilities'].update({'first.publish': 1, 'first.open_pr': 1, 'second.open_pr': 1})
+        store = Store.create(self.root / 'github', policy)
+        remote = FakeGitHub()
+        with patch('agent_leases.adapters.github.GitHub', return_value=remote):
+            gateway = Gateway(store, {**mcp_config(self.root), 'first': {'token_file': 'unused'},
+                                      'second': {'token_file': 'unused'}})
+        try:
+            result = gateway.handle(operation_request('first.publish', {'message': 'x', 'files': {'x': 'x'}}))
+            branch = result['result']['branch']
+            params = {'branch': branch, 'title': 'x', 'body': ''}
+            before = len(remote.calls)
+            self.assertEqual(gateway.handle(operation_request('second.open_pr', params))['error']['code'], 'scope')
+            self.assertEqual(len(remote.calls), before)
+            self.assertTrue(gateway.handle(operation_request('first.open_pr', params))['ok'])
+        finally:
+            gateway.close()

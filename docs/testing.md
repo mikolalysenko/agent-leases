@@ -6,7 +6,7 @@ The unit and integration suite checks policy compilation, adapters, SQLite count
 python3 -m unittest discover -v
 ```
 
-[Permission Matrix](https://github.com/mikolalysenko/permission-matrix) tests the running system through separate worker processes. The original adapter has been merged. The v0.3 request-flow extension is on its `agent-leases-inbox` branch; Agent Leases CI pins the exact tested commit. From a checkout containing that extension:
+[Permission Matrix](https://github.com/mikolalysenko/permission-matrix) tests the running system through separate worker processes. The original adapter has been merged. The v0.3 request-flow extension is in [PR #2](https://github.com/mikolalysenko/permission-matrix/pull/2) on its `agent-leases-inbox` branch; Agent Leases CI pins the exact tested commit. From a checkout containing that extension:
 
 ```sh
 cd ../permission-matrix

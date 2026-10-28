@@ -30,7 +30,7 @@ def parser():
     root = CommandParser(usage="lease COMMAND ...",
         description="Run a command with a task budget. Keep credentials outside it.",
         epilog="Start with: lease demo. Use lease COMMAND --help for details.")
-    sub = root.add_subparsers(dest="command", required=True)
+    sub = root.add_subparsers(prog="lease", dest="command", required=True)
     init = sub.add_parser("init", help="write a starter policy to stdout")
     init.add_argument("repo", help="owner/repo")
     init.add_argument("--commit", required=True, help="reviewed parent commit SHA")
@@ -46,7 +46,8 @@ def parser():
     audit = sub.add_parser("audit", help="show the lease's log")
     audit.add_argument("--verify", action="store_true")
     server = sub.add_parser("serve", help="start the gateway with your token file")
-    launch = sub.add_parser("launch", help="approve, start gateway, run sandbox, and clean up (Linux)")
+    launch = sub.add_parser("launch", help="approve, start gateway, run sandbox, and clean up (Linux)",
+                           epilog="Append -- COMMAND [ARGS...] to choose the sandboxed command.")
     launch.add_argument("policy")
     launch.add_argument("--workspace", required=True)
     launch.set_defaults(argv=[])
@@ -105,7 +106,8 @@ def parser():
     wait.add_argument("id")
     wait.add_argument("--poll", action="store_true")
     wait.add_argument("--json", action="store_true")
-    run = sub.add_parser("run", help="Linux: launch a worker with only its workspace and lease socket")
+    run = sub.add_parser("run", help="Linux: launch a worker with only its workspace and lease socket",
+                        epilog="Append -- COMMAND [ARGS...] to choose the sandboxed command.")
     run.add_argument("--workspace", required=True)
     run.set_defaults(argv=[])
     for item in (status, read, publish, pr, comment, call, mcp, run, catalog, ask, request, wait):

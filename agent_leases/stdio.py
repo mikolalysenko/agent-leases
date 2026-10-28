@@ -95,6 +95,7 @@ class Stdio:
             raise
 
     def close(self):
+        self.broken = True
         if self.process is not None:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)

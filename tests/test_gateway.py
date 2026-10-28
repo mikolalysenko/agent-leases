@@ -191,6 +191,13 @@ class GatewayTests(unittest.TestCase):
                 self.call()
         self.assertEqual(self.remote.calls, [])
 
+    def test_closed_gateway_cannot_restart_an_adapter_or_spend_budget(self):
+        self.assertTrue(self.call()["ok"])
+        self.gateway.close()
+        self.assertEqual(self.call(key="after-close")["error"]["code"], "unavailable")
+        self.assertEqual(len(self.remote.calls), 1)
+        self.assertEqual(self.store.status()["used"]["operations"], 1)
+
     def test_socket_roundtrip_and_malformed_json(self):
         address = str(Path(self.temp.name) / "g.sock")
         with Server(address, self.gateway) as server:

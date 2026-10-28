@@ -25,10 +25,13 @@ class Gateway:
         self.store = store
         self.adapters = connect(store.status()["policy"], config)
         self.lock = threading.Lock()
+        self.closed = False
 
     def close(self):
-        for adapter in self.adapters.values():
-            adapter.close()
+        self.closed = True
+        with self.lock:
+            for adapter in self.adapters.values():
+                adapter.close()
 
     def handle(self, request):
         try:
@@ -48,6 +51,8 @@ class Gateway:
                     return {"ok": True, "result": self.store.inbox(request["request_id"])}
             validate_request(request, self.store.status()["policy"])
             with self.lock:
+                if self.closed:
+                    raise Denied("unavailable", "gateway is shutting down")
                 cached = self.store.reserve(request)
                 if cached is not None:
                     return cached
