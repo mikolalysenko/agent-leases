@@ -35,8 +35,12 @@ Verification of the implementation at `043f128`:
 A follow-up review added checks for ownership across service aliases, malformed
 MCP responses after effects, denied server callbacks, and adapter shutdown.
 Gateway shutdown now refuses queued operations before closing adapters, so a
-queued call cannot restart an upstream connection. All 62 tests pass locally
-apart from the eight Linux-only checks, which run in CI.
+queued call cannot restart an upstream connection.
+
+[The final code run at `dc2ecc1`](https://github.com/mikolalysenko/agent-leases/actions/runs/40689013484)
+passed **all 62 tests on Linux**, including the eight sandbox/launcher integrations,
+and **all 395 matrix checks** again with no gaps or unknowns. Its saved report and
+unit log were downloaded and checked. Packaging and the offline demo passed too.
 
 ## Simplification and permission-matrix integration
 
