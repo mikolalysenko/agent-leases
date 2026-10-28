@@ -10,7 +10,17 @@ The README now starts with the task-budget example. Setup, agent use, design, an
 
 Permission Matrix gained a dedicated lease adapter. It observes the actual gateway through CLI, socket, and MCP worker processes and repeats those interactions inside the Linux sandbox. It preserves per-cell evidence and treats missing controls as unknown. Its observer tests ensure that a forbidden effect wins over a claimed denial or a worker crash.
 
-Initial local verification: 164 host-interface matrix checks passed with no gaps or unknowns. Two malformed-file probes initially failed in the driver before reaching the tool; they were corrected to send the invalid payload through the JSON interface. The expanded Linux run and final counts are recorded after CI verification.
+Verification:
+
+- [Linux CI](https://github.com/mikolalysenko/agent-leases/actions/runs/40623965239): **371 matrix checks across 75 cases and six paths passed**, with no gaps or unknowns. The saved report was checked against the entire declared case inventory; every cell had a working control and evidence. Provider effects, budget ceilings, partial revocation, and controlled network delivery were also inspected.
+- The same suite passed in [Permission Matrix's Linux workflow](https://github.com/mikolalysenko/permission-matrix/actions/runs/40623966782).
+- All 32 lease unit/integration tests passed on Linux. Packaging and the offline demo worked from a fresh install outside the checkout. macOS passed 31 tests and correctly skipped the Linux-only unit integration test.
+- The isolated permission-matrix branch passed all 31 existing/new tests; the user's current working tree passed all 59 of its tests. Its six observer checks include injected writes followed by misleading denial/error responses.
+- A live read through the simplified token-file gateway matched the committed README, repeated without consuming another read, and was refused after revocation. No live writes were performed.
+
+Two malformed-file probes initially failed in the matrix driver before reaching the tool; they were corrected to send the invalid payload through the JSON interface. No enforcement gap was observed in the completed inventory. This is a result for these tested interactions, not a claim about every possible attack.
+
+Existing uncommitted permission-matrix work was preserved. The lease adapter was published on a separate `agent-leases-adapter` branch; Agent Leases CI pins its tested commit.
 
 ## Original MVP
 
