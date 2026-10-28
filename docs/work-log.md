@@ -24,6 +24,15 @@ Decisions:
 - **Explicit CI prerequisite.** The prototype requires a disposable repository without privileged automation. Blocking `.github` edits is additional protection, not sufficient isolation.
 - **Linux execution only.** macOS can run the gateway and client for development but cannot claim the worker sandbox boundary.
 
-Local verification on macOS passed the Python 3.9 and Python 3.14 gateway suite. The suite was then expanded to include actual OpenSSL signature verification, token refresh, fixed-host HTTPS behavior, and Linux boundary tests. Linux verification and final repository checks are recorded below after CI.
+Verification:
 
-Live GitHub App installation token minting requires an operator-owned installed App and key; those are not provisioned by this repository. Unit tests verify the signing, scoping, refresh, and request construction without real credentials. The offline demo is explicitly simulated.
+- macOS, Python 3.9.6 and 3.14.8: 27 tests passed; the one Linux integration test was correctly skipped.
+- [Ubuntu 24.04 CI](https://github.com/mikolalysenko/agent-leases/actions/runs/40616732020), implementation commit `6755f13`: all 28 tests passed, including real bubblewrap TCP/UDP/IPv6/DNS isolation, hidden host files/environment, socket operation restrictions, and alternate-socket rejection. The required sandbox test was not skipped.
+- The credential-free demo completed in local runs and CI.
+- A built wheel installed in a fresh virtual environment. The installed CLI successfully approved a policy, granted one cap, revoked the lease, and verified its audit chain. CI also built/installed the package and checked the entry point.
+- A live, read-only GitHub smoke check used an explicitly supplied operator credential in a temporary private token file. The gateway read `README.md` at the committed SHA and matched the local file exactly. After revocation, the next read returned `revoked`. No remote writes were issued by that check, and its token/state directory was removed afterward.
+- `git diff --check` passed. Source and fixtures were checked for credential material before the public push.
+
+Repository: [mikolalysenko/agent-leases](https://github.com/mikolalysenko/agent-leases). Local checkout: `agent-leases` in the requested Projects workspace.
+
+Live GitHub App installation token minting requires an operator-owned installed App and key; those were not provisioned. Tests verify actual JWT signatures plus mocked issuance, scoping, refresh, and operation construction. Live publish/PR/comment calls were not exercised against GitHub; their exact request sequences and failure cases were tested against the recording provider. The offline demo is explicitly simulated.
