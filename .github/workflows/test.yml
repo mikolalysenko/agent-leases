@@ -33,3 +33,37 @@ jobs:
           python3 -m venv /tmp/lease-package-test
           /tmp/lease-package-test/bin/pip install .
           /tmp/lease-package-test/bin/lease --help
+          cd /tmp
+          /tmp/lease-package-test/bin/lease demo
+
+  permission-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: mikolalysenko/permission-matrix
+          ref: 13418a30e2fc5b51480466f6d856e944165585e8
+          path: permission-matrix
+          persist-credentials: false
+      - name: Install sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Exercise CLI, socket, MCP, and Linux boundaries
+        run: python3 permission-matrix/adapters/agent_leases/main.py --repo . --output matrix-results
+      - name: Summarize
+        if: always()
+        run: |
+          if [ -f matrix-results/report.md ]; then
+            cat matrix-results/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: permission-matrix
+          path: matrix-results

@@ -1,19 +1,17 @@
 """GitHub-only HTTPS transport and credentials. No proxy, redirects, or retries."""
 
-import base64
-from datetime import datetime
 import http.client
 import os
 from pathlib import Path
 import stat
-import subprocess
-import time
 
 from .policy import Denied, canonical, parse_json
 
 
 class UpstreamError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        self.status = status
+        super().__init__(message)
 
 
 def private_file(filename):
@@ -32,11 +30,11 @@ def https(method, path, token, data=None):
                                     "Accept": "application/vnd.github+json",
                                     "Content-Type": "application/json",
                                     "X-GitHub-Api-Version": "2026-03-10",
-                                    "User-Agent": "agent-leases/0.1"})
+                                    "User-Agent": "agent-leases/0.2"})
         response = connection.getresponse()
         if not 200 <= response.status < 300:
             # Do not echo upstream bodies, headers, or credentials to the worker.
-            raise UpstreamError("GitHub returned HTTP %d; no automatic retry" % response.status)
+            raise UpstreamError("GitHub returned HTTP %d" % response.status, response.status)
         body = response.read(2 * 1024 * 1024 + 1)
         if len(body) > 2 * 1024 * 1024:
             raise UpstreamError("GitHub response exceeds 2 MiB")
@@ -47,56 +45,16 @@ def https(method, path, token, data=None):
         connection.close()
 
 
-class TokenFile:
-    """Operator-supplied fallback. The operator is responsible for its scope/expiry."""
-    def __init__(self, filename):
-        self.filename = private_file(filename)
-
-    def token(self, repo, permissions):
-        value = private_file(self.filename).read_text().strip()
-        if not value or len(value) > 16384 or any(c.isspace() for c in value):
-            raise UpstreamError("invalid token file")
-        return value
-
-
-def b64(value):
-    return base64.urlsafe_b64encode(value).decode().rstrip("=")
-
-
-class GitHubApp:
-    """One broker per lease. Mint repository/permission-scoped tokens lazily."""
-    def __init__(self, app_id, installation_id, private_key):
-        self.app_id = str(app_id)
-        self.installation_id = int(installation_id)
-        if self.installation_id < 1:
-            raise ValueError("installation ID must be positive")
-        self.private_key = private_file(private_key)
-        self.cache = {}
-
-    def token(self, repo, permissions):
-        key = (repo, canonical(permissions))
-        cached = self.cache.get(key)
-        if cached and cached[1] > time.time() + 60:
-            return cached[0]
-        now = int(time.time())
-        header = b64(canonical({"alg": "RS256", "typ": "JWT"}).encode())
-        claims = b64(canonical({"iat": now - 60, "exp": now + 540, "iss": self.app_id}).encode())
-        message = (header + "." + claims).encode()
-        signed = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private_key)],
-                                input=message, capture_output=True, check=True, timeout=10)
-        jwt = message.decode() + "." + b64(signed.stdout)
-        result = https("POST", "/app/installations/%d/access_tokens" % self.installation_id,
-                       jwt, {"repositories": [repo.split("/")[1]], "permissions": permissions})
-        expires = datetime.fromisoformat(result["expires_at"].replace("Z", "+00:00")).timestamp()
-        self.cache[key] = (result["token"], expires)
-        return result["token"]
-
-
 class GitHub:
-    def __init__(self, credentials):
-        self.credentials = credentials
+    """One repository, one operator-supplied token file. No ambient credentials."""
+    def __init__(self, repo, token_file):
+        self.root = "/repos/" + repo + "/"
+        self.token_file = private_file(token_file)
 
-    def request(self, repo, permissions, method, path, data=None):
-        if not path.startswith("/repos/" + repo + "/"):
+    def request(self, method, path, data=None):
+        if not path.startswith(self.root):
             raise ValueError("internal error: request escaped its repository")
-        return https(method, path, self.credentials.token(repo, permissions), data)
+        token = private_file(self.token_file).read_text().strip()
+        if not token or len(token) > 16384 or any(c.isspace() for c in token):
+            raise UpstreamError("invalid token file")
+        return https(method, path, token, data)

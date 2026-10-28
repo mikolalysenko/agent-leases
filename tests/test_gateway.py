@@ -51,9 +51,9 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status["used"]["operations"], 4)
         self.assertEqual(status["used"]["write_operations"], 3)
         self.assertEqual(len(self.remote.calls), 7)
-        refs = [call for call in self.remote.calls if call[3].endswith("/git/refs")]
-        self.assertEqual(refs[0][4]["ref"], "refs/heads/lease/%s/change-1" % status["id"])
-        pr = next(call[4] for call in self.remote.calls if call[3].endswith("/pulls"))
+        refs = [call for call in self.remote.calls if call[1].endswith("/git/refs")]
+        self.assertEqual(refs[0][2]["ref"], "refs/heads/lease/%s/change-1" % status["id"])
+        pr = next(call[2] for call in self.remote.calls if call[1].endswith("/pulls"))
         self.assertTrue(pr["draft"])
         self.assertFalse(pr["maintainer_can_modify"])
         self.assertIn("Lease: " + status["id"], pr["body"])
@@ -61,7 +61,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_read_is_pinned_and_cannot_choose_host_repo_or_ref(self):
         self.call()
-        self.assertIn("?ref=" + policy()["base_sha"], self.remote.calls[0][3])
+        self.assertIn("?ref=" + policy()["base_sha"], self.remote.calls[0][1])
         for extra in ({"repo": "attacker/exfil"}, {"ref": "evil"}, {"token": "foreign"},
                       {"url": "https://attacker.invalid"}):
             result = self.call(params={"path": "README.md", **extra}, key="bad")

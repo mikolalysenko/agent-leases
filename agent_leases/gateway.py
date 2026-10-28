@@ -7,7 +7,8 @@ import socketserver
 import threading
 from urllib.parse import quote
 
-from .policy import (Denied, MAX_MESSAGE, canonical, fields, parse_json,
+from .github import UpstreamError
+from .policy import (Denied, MAX_MESSAGE, canonical, digest, fields, parse_json,
                      validate_request)
 
 
@@ -33,6 +34,10 @@ class Gateway:
                     response = {"ok": True, "result": result}
                 except Denied as exc:
                     response, owned = self.store.denial(exc), None
+                except UpstreamError as exc:
+                    error = Denied("upstream" if exc.status else "uncertain",
+                                   str(exc) if exc.status else "GitHub connection failed; inspect GitHub before new work")
+                    response, owned = self.store.denial(error), None
                 except Exception:
                     # A timeout, bad response, or even a crash after a POST can mean
                     # the write succeeded. Preserve the reservation and never replay.
@@ -48,13 +53,9 @@ class Gateway:
         policy, op, params = lease["policy"], request["operation"], request["params"]
         repo = policy["repo"]
         root = "/repos/" + repo
-        permissions = ({"contents": "write"} if op == "publish" else
-                       {"contents": "read"} if op == "read_file" else
-                       {"pull_requests": "write"})
-
         def call(method, suffix, data=None):
             self.store.dispatch(request["id"], method, root + suffix)
-            return self.github.request(repo, permissions, method, root + suffix, data)
+            return self.github.request(method, root + suffix, data)
 
         stamp = "\n\nLease: %s\nLease-Request: %s" % (lease["id"], request["id"])
         if op == "read_file":
@@ -172,3 +173,10 @@ def client(address, request):
         if len(data) > 2 * MAX_MESSAGE or not data.endswith(b"\n"):
             raise ValueError("invalid gateway response")
         return parse_json(data)
+
+
+def operation_request(operation, params, request_id=None):
+    """Identical commands safely reuse their result unless an explicit ID is supplied."""
+    request = {"operation": operation, "params": params}
+    request["id"] = request_id if request_id is not None else digest(request)
+    return validate_request(request)

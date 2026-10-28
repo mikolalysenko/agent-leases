@@ -9,8 +9,8 @@ class FakeGitHub:
         self.calls = []
         self.hook = None
 
-    def request(self, repo, permissions, method, path, data=None):
-        self.calls.append((repo, copy.deepcopy(permissions), method, path, copy.deepcopy(data)))
+    def request(self, method, path, data=None):
+        self.calls.append((method, path, copy.deepcopy(data)))
         if self.hook:
             self.hook(method, path, data)
         if "/contents/" in path:

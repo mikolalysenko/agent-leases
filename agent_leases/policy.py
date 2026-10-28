@@ -147,3 +147,12 @@ def validate_request(request):
         integer(params["number"], "PR number", 1)
         string(params["body"], "body", maximum=32000)
     return request
+
+
+def starter_policy(repo, commit, base="main", ttl_seconds=3600, purpose="Make a small change"):
+    return compile_policy({
+        "version": "mvp-1", "purpose": purpose, "repo": repo, "base": base,
+        "base_sha": commit, "ttl_seconds": ttl_seconds,
+        "capabilities": {"read_file": 20, "publish": 1, "open_pr": 1, "comment": 2},
+        "limits": {"operations": 24, "write_operations": 4, "payload_bytes": 1048576},
+    })

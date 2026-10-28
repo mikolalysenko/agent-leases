@@ -1,97 +1,59 @@
-# Implementation design
+# How it works
 
-The worker is untrusted. The gateway, its operator CLI, its private SQLite directory, the credential provider, the kernel, bubblewrap, and the mounted system tools are trusted. One gateway process owns one approved lease. Administrative commands never cross the worker socket.
+There are three pieces:
 
-```mermaid
-flowchart LR
-  O[Operator CLI] -->|approve / grant / revoke| D[(Private SQLite state)]
-  W[Linux worker sandbox] -->|four operations + status| S[Per-lease Unix socket]
-  S --> G[Gateway]
-  G -->|reserve / authorize / audit| D
-  G --> B[Credential provider]
-  B -->|scoped installation tokens| H[GitHub API]
-  G -->|fixed REST requests| H
-```
+1. **The operator** approves a policy, adds budget, or revokes it using local commands.
+2. **The gateway** keeps the token and SQLite state. It checks requests and constructs GitHub API calls.
+3. **The worker** uses CLI, MCP, or the Unix socket. On Linux it runs in a sandbox with that socket as its only service connection.
 
-## Policy
+All worker interfaces reach the same checks. The worker cannot edit the policy, see the token, or call administrative commands through the socket. There is one gateway per lease; access to its socket is access to that lease.
 
-`version: mvp-1` is intentionally distinct from the proposed v0.2 format. All fields and all four capability entries are mandatory. Unknown fields, duplicate JSON keys, booleans in numeric fields, negative counts, non-finite numbers, malformed repo names, and invalid paths are rejected. A zero capability denies that operation. No inheritance or wildcard resources.
+## Policy and counters
 
-The full example is [examples/lease.json](../examples/lease.json). `purpose` grants nothing. `repo` fixes the only GitHub repository. `base_sha` fixes file reads and commit ancestry; `base` fixes the PR target branch name. An operator must check their relationship. The branch can move after approval. Lifetime is 1–86400 seconds, measured from approval by the trusted host clock. Clock rollback is outside the threat model.
+`lease init` writes the full policy; [the example](../examples/lease.json) shows its fields. Approval validates every field and displays the resulting permissions. Unknown fields and ambiguous JSON are rejected. `purpose` is an explanation, not a permission.
 
-| Counter | Exact meaning |
+`repo` selects one GitHub repository. `base_sha` pins reads and the parent of new commits. `base` names the PR target branch, which can move. The operator must choose a reviewed commit and appropriate base. `ttl_seconds` sets a lifetime of at most one day.
+
+| Counter | What consumes it |
 | --- | --- |
-| `capabilities.<operation>` | Number of admitted attempts of that operation |
-| `limits.operations` | Number of admitted attempts across the four operations |
-| `limits.write_operations` | Number of admitted `publish`, `open_pr`, and `comment` attempts |
-| `limits.payload_bytes` | Sum of canonical ASCII JSON bytes of each admitted request's `params` |
+| `read_file`, `publish`, `open_pr`, `comment` | One admitted attempt of that operation |
+| `operations` | Any admitted operation |
+| `write_operations` | An admitted publish, PR, or comment |
+| `payload_bytes` | Canonical JSON bytes of admitted input parameters |
 
-Payload bytes are **not wire bytes or total network egress**. They do not include transport headers, broker traffic, repeated data in a multi-step publish, responses, or generated stamps. Canonical encoding uses sorted keys, compact separators, and ASCII escaping; a non-ASCII character may occupy several bytes. There is no `cost_usd`, network byte, CPU, or raw HTTP request cap in this version.
+Counters are reserved together before sending anything. A publish is one logical operation: getting the parent, creating a tree, creating a commit, and creating a new branch. That includes three remote writes. The byte counter measures input, not network traffic. Status, denied requests, and replayed results do not consume these budgets.
 
-One publish costs one logical write operation and makes one GET plus three POSTs: get parent commit, create tree, create commit, create reference. The tree API may create multiple blobs. A cap of one publish is not a cap of one upstream side effect. Every dispatch is logged separately. This explicit definition avoids the source spec's ambiguity around pushes and aggregate writes.
+Files must be ordinary UTF-8 text with relative paths. Reads are limited to 256 KiB. Publishing accepts 1–50 files, makes them regular `100644` files, and forbids `.github` changes, deletions, symlinks, submodules, and executable modes. These restrictions do not make existing CI safe.
 
-Denied requests and `status` do not consume these counters. Invalid/denied requests are logged; status is observational. Gateway availability and log-volume exhaustion are separate concerns, not solved by the lease's operation budget.
+## One request from start to finish
 
-## Worker protocol
+1. Validate its operation, parameters, and request ID.
+2. In one SQLite transaction, check expiration, revocation, resource ownership, and all budgets. Reserve the budgets and save the pending request.
+3. Before each GitHub call, check expiration/revocation again and log the dispatch authorization.
+4. Save the result and any branch/PR it created. The result can then be returned again without sending another request.
 
-One JSON object followed by a newline per Unix stream connection, at most 1 MiB. One response followed by a newline. There are at most eight connection handlers and one operation executes at a time. Each connection has a read timeout. The gateway does not accept unbounded HTTP bodies, proxy headers, alternate credentials, or native Git traffic.
+A changed request under an existing ID is refused. CLI and MCP derive default IDs from the operation and parameters; explicit IDs remain available for intentional repeats.
 
-```json
-{"operation":"status"}
-```
+Failures keep their reservation. After a restart, unfinished requests become uncertain and are not replayed. A crash can therefore consume budget without creating a remote effect, or leave an effect whose ownership was not recorded. There is no automatic refund or reconciliation. The operator must inspect GitHub before replacing uncertain work.
+
+Revocation stops new dispatch authorizations, including remaining steps of a publish. A previously authorized request can still complete. Revocation does not kill the worker, delete files, or revoke the operator's GitHub token.
+
+## Token and state
+
+The gateway reads one operator-supplied token file. It never uses ambient `gh` or environment credentials. The operator controls the token's repository scope, permissions, expiry, and replacement. There is no token issuance or refresh service.
+
+HTTPS goes only to `api.github.com`, verifies TLS, ignores proxy environment variables, rejects redirects, bounds responses, and does not retry. The worker cannot supply URLs, credentials, HTTP methods, or a different repo. PRs and comments are restricted using locally recorded successful creations, not name prefixes or body stamps.
+
+The private state directory contains policy, counters, recorded results, and events. Results can include source code; protect the directory accordingly. Events omit request bodies. Their hash chain can detect local record changes, but is not immutable or externally anchored. Do not restore a stale database as active authority.
+
+A grant raises exactly one ceiling after displaying the diff and checking that the policy has not changed during approval. It cannot change the repo or expiration. The worker gets no grant endpoint.
+
+## Wire format
+
+One newline-terminated JSON request per Unix socket connection; maximum 1 MiB:
 
 ```json
 {"id":"read-1","operation":"read_file","params":{"path":"README.md"}}
 ```
 
-```json
-{"id":"change-1","operation":"publish","params":{"message":"Fix flaky test","files":{"test.txt":"new contents\n"}}}
-```
-
-```json
-{"id":"pr-1","operation":"open_pr","params":{"branch":"lease/RETURNED_LEASE_ID/change-1","title":"Fix flaky test","body":"What changed and how it was checked."}}
-```
-
-```json
-{"id":"comment-1","operation":"comment","params":{"number":7,"body":"Validation complete."}}
-```
-
-The caller cannot select a repo, base, draft state, method, URL, permissions, ref to overwrite, author identity, or token. `open_pr` checks the branch against this lease's persisted successful publishes; `comment` checks the PR against persisted successful PR creation. Ownership is not inferred from a name prefix, bot identity, or forgeable body stamp. Other trusted actors can still alter a branch remotely; this prototype does not freeze remote branch contents after creation.
-
-Reads return text files of at most 256 KiB. Publishing accepts 1–50 UTF-8 text files, each at most 256 KiB and subject to the total request limit. Paths use a deliberately narrow ASCII alphabet. There are no deletions, executable bits, binary blobs, symlinks, or submodules. `.github` writes are denied as defense in depth, not as proof of CI safety.
-
-A worker CLI call is equivalent to the JSON form:
-
-```sh
-lease call comment --id comment-1 --params '{"number":7,"body":"Validation complete."}'
-```
-
-Responses have `ok: true` and `result`, or `ok: false` and `error`. Denials include a random audit ID, stable code, a plain rule, and `retryable: false`. Limit denials also include `used`, `left`, and `needed`. Error codes include `invalid`, `unknown_operation`, `scope`, `limit`, `conflict`, `in_progress`, `expired`, `revoked`, `uncertain`, and `unavailable`. No code licenses automatic retries with a new ID. A person may grant budget, inspect GitHub, or approve a corrected new lease as appropriate.
-
-## Operation lifecycle
-
-1. Validate the complete request before touching credentials.
-2. In `BEGIN IMMEDIATE`, check lifetime/revocation and any previous use of this ID. A changed request under the same ID is a conflict. A completed request returns its persisted result.
-3. Check branch/PR ownership, then reserve the operation, aggregate, and payload budgets together. Persist the request digest and a `pending` record with the reservation event in the same transaction.
-4. Before **each** GitHub request, commit a dispatch authorization and log record after checking revocation and expiry again. This transaction defines the revocation cutoff. Network I/O runs outside the transaction so an operator can revoke during a slow request.
-5. Save the result and successful branch/PR ownership atomically. Upstream exceptions become `uncertain`; no upstream body is echoed to the worker. A provider error may also be an ordinary rejection, but this MVP deliberately handles both conservatively.
-
-On startup, the gateway takes an exclusive process lock, verifies the local audit chain, and converts unfinished reservations to `uncertain`. It never replays them. A crash before sending can therefore consume a budget unit without an effect; a crash after sending can leave an effect without locally recorded ownership. There is no automatic refund, ownership recovery, or reconciliation tool yet. Inspect the provider before doing replacement work.
-
-No remote exactly-once guarantee is claimed. Duplicate delivery under the same ID causes no new upstream calls, provided the authority DB has not been rolled back. Restoring a stale DB backup or deleting it can break that property and is outside the worker threat model. Revoked and expired leases deny cached-operation requests too; status remains available.
-
-## Operator authority
-
-Approval renders the validated policy and its hash. The private directory is created new, mode `0700`; the DB and socket use `0600`. The agent only receives a bind mount of the socket file, never its parent directory. Socket access is the lease capability; it must not be shared with another worker that should have a different budget.
-
-`grant` changes one numeric ceiling. It shows the exact diff, validates the current lease, and compares the policy hash again inside the commit transaction. If policy changed during review, it refuses. It can enable a previously zero capability because the operator is the authority. It cannot change resources or expiration. No socket operation can approve, grant, revoke, or directly write audit records.
-
-`revoke` commits a persistent flag. Every later dispatch authorization fails. An authorized request may still begin or complete its network work after revocation; GitHub may queue downstream activity. The prototype does not kill the worker or erase files it already read. A gateway restart creates a new socket inode; restart sandboxed workers after restarting the gateway.
-
-## Credentials and audit
-
-In App mode, the broker caches one-repository tokens by the operation's needed permissions: Contents read, Contents write, or Pull requests write. It renews when less than a minute remains. The App key never enters the sandbox. App installation permissions and selected repositories are an outer limit; the gateway's closed operation schema supplies the finer limit.
-
-Token-file mode is explicitly operator-scoped and has no auto-refresh. Neither mode uses ambient shell credentials. HTTPS always connects to `api.github.com`, verifies TLS through Python's default HTTPS context, does not read proxy environment variables, does not follow redirects, bounds responses, and never retries. App-token issuance is control-plane traffic, outside worker counters; operation dispatch attempts are audited before token acquisition/network use.
-
-Audit records include approval policy, grants, revocation, request digests, reservations and counters, dispatch method/path, denial codes, and completion digests. Payload bodies are omitted from events; request results, including read file contents, are persisted privately for replay. Protect the entire state directory as sensitive data. The hash chain detects record changes relative to its current stored history; it is neither off-host append-only storage nor protection against a trusted host rewriting/truncating history.
+Status needs only `{"operation":"status"}`. Responses use the same shape described in [agent setup](agents.md). There are up to eight connections and one executing operation. The server takes an exclusive lock before restart recovery. Restart workers after restarting the gateway because the socket inode changes.
